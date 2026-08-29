@@ -1,8 +1,7 @@
+paddlepaddle
+paddleocr
+opencv-python-headless
 streamlit
 pandas
-openpyxl
-numpy<2.0.0
 Pillow
-paddlepaddle==2.6.0
-paddleocr==2.8.1
-opencv-python-headless==4.9.0.80
+openpyxl
