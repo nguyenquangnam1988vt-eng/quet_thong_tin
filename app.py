@@ -4,14 +4,27 @@ import re
 from io import BytesIO
 from PIL import Image, ImageEnhance
 import numpy as np
-from paddleocr import PaddleOCR
+
+# ---- Bắt lỗi import PaddleOCR ----
+try:
+    from paddleocr import PaddleOCR
+    PADDLE_AVAILABLE = True
+except ImportError as e:
+    PADDLE_AVAILABLE = False
+    PADDLE_ERROR = str(e)
 
 # --------------------- CÀI ĐẶT BAN ĐẦU ---------------------
 st.set_page_config(page_title="OCR Info Extractor (PaddleOCR)", page_icon="📄", layout="wide")
 
+# ---- Kiểm tra và thông báo nếu thiếu thư viện ----
+if not PADDLE_AVAILABLE:
+    st.error(f"⚠️ Thiếu thư viện PaddleOCR hoặc phụ thuộc.\nChi tiết: {PADDLE_ERROR}\n\nVui lòng cài đặt bằng lệnh:\n"
+             "```bash\npip install paddlepaddle paddleocr opencv-python-headless\n```")
+    st.stop()
+
 @st.cache_resource
 def load_paddle_ocr():
-    # Sử dụng tiếng Việt, tắt log để terminal gọn gàng
+    # Tắt log để gọn gàng
     return PaddleOCR(use_angle_cls=True, lang='vi', show_log=False)
 
 # --------------------- KHỞI TẠO SESSION STATE ---------------------
@@ -47,7 +60,7 @@ def preprocess_image(image_input):
         enhancer = ImageEnhance.Contrast(img)
         img = enhancer.enhance(1.5)
         
-        # Resize nếu ảnh quá lớn để tăng tốc độ OCR
+        # Resize nếu ảnh quá lớn
         max_size = 1500
         if max(img.size) > max_size:
             ratio = max_size / max(img.size)
@@ -59,7 +72,7 @@ def preprocess_image(image_input):
         st.error(f"Lỗi tiền xử lý ảnh: {e}")
         return None
 
-# --------------------- HÀM OCR VỚI PADDLEOCR ---------------------
+# --------------------- HÀM OCR ---------------------
 def ocr_image(image_input):
     img_np = preprocess_image(image_input)
     if img_np is None:
@@ -68,27 +81,26 @@ def ocr_image(image_input):
         ocr = load_paddle_ocr()
         result = ocr.ocr(img_np, cls=True)
         
-        # Xử lý an toàn nếu result rỗng hoặc None
-        if not result or result[0] is None:
+        # Kiểm tra kết quả rỗng
+        if not result or not result[0]:
             return ""
             
         lines = []
         for line in result:
             for word_info in line:
-                # Cấu trúc word_info: [bbox, (text, confidence)]
+                # word_info: [bbox, (text, confidence)]
                 lines.append(word_info[1][0])
         return "\n".join(lines)
     except Exception as e:
         st.error(f"Lỗi OCR: {e}")
         return ""
 
-# --------------------- PHÁT HIỆN TRƯỜNG TỰ ĐỘNG ---------------------
+# --------------------- PHÁT HIỆN TRƯỜNG ---------------------
 def auto_detect_fields(text):
     if not text.strip():
         return []
     
     detected = []
-    # Cải thiện Regex: bỏ qua khoảng trắng linh hoạt hơn
     pattern = re.compile(r'([^:：\n]+?)\s*[:：]\s*([^\n]+)', re.UNICODE)
     matches = pattern.findall(text)
     
@@ -96,8 +108,6 @@ def auto_detect_fields(text):
     for field_name, value in matches:
         field_name = field_name.strip()
         value = value.strip()
-        
-        # Lọc nhiễu: Tên trường không quá dài, không chứa toàn ký tự đặc biệt
         if 0 < len(field_name) < 50 and not re.search(r'[^\w\sÀ-ỹ]', field_name) and len(value) > 0:
             if field_name not in seen:
                 seen.add(field_name)
@@ -108,7 +118,7 @@ def auto_detect_fields(text):
                 })
     return detected
 
-# --------------------- QUẢN LÝ TRƯỜNG DỮ LIỆU ---------------------
+# --------------------- QUẢN LÝ TRƯỜNG ---------------------
 def add_field(name, keyword, keep=True):
     st.session_state.field_counter += 1
     st.session_state.fields.append({
@@ -133,16 +143,13 @@ def extract_values(text, fields):
     row = {}
     for f in fields:
         if f['keep']:
-            # Tìm kiếm keyword linh hoạt (có hoặc không có khoảng trắng trước giá trị)
             pattern = re.compile(rf"{re.escape(f['keyword'])}\s*(.+)", re.IGNORECASE | re.UNICODE)
             match = pattern.search(text)
-            
             if not match:
-                # Dự phòng trường hợp OCR sót dấu hai chấm, cách nhau bằng khoảng trắng dài
+                # Dự phòng nếu OCR sót dấu hai chấm
                 kw_no_colon = f['keyword'].replace(':', '').strip()
                 pattern2 = re.compile(rf"{re.escape(kw_no_colon)}\s+(.+)", re.IGNORECASE | re.UNICODE)
                 match = pattern2.search(text)
-                
             row[f['name']] = match.group(1).strip() if match else ""
     return row
 
@@ -154,7 +161,7 @@ st.markdown("---")
 with st.sidebar:
     st.header("⚙️ Quản lý trường thông tin")
     
-    # 1. Hiển thị trường vừa phát hiện tự động
+    # 1. Trường phát hiện tự động
     if st.session_state.detected_fields:
         st.subheader("🔍 Các trường vừa phát hiện")
         st.info("Chọn các trường muốn lưu lại.")
@@ -165,7 +172,6 @@ with st.sidebar:
                 keep = st.checkbox("Giữ", value=True, key=f"detect_keep_{idx}")
             with col2:
                 new_name = st.text_input("Tên trường", value=d['name'], key=f"detect_name_{idx}", label_visibility="collapsed")
-                
             detected_choices.append({
                 'keep': keep,
                 'new_name': new_name,
@@ -181,12 +187,12 @@ with st.sidebar:
                         add_field(choice['new_name'], choice['keyword'], keep=True)
                         count += 1
                 st.session_state.detected_fields = []
-                st.toast(f"Đã thêm {count} trường!", icon="✅")
-                st.rerun()
+                st.success(f"Đã thêm {count} trường!")
+                st.experimental_rerun()
         with col_btn2:
             if st.button("🗑️ Bỏ qua", use_container_width=True):
                 st.session_state.detected_fields = []
-                st.rerun()
+                st.experimental_rerun()
         st.markdown("---")
     
     # 2. Thêm trường thủ công
@@ -196,8 +202,8 @@ with st.sidebar:
         if st.button("Thêm trường", use_container_width=True):
             if new_name and new_keyword:
                 add_field(new_name, new_keyword)
-                st.toast(f"Đã thêm trường '{new_name}'", icon="✅")
-                st.rerun()
+                st.success(f"Đã thêm trường '{new_name}'")
+                st.experimental_rerun()
             else:
                 st.error("Vui lòng nhập đủ tên và từ khóa.")
     
@@ -216,21 +222,21 @@ with st.sidebar:
                 with col4:
                     if st.button("Cập nhật", key=f"update_{f['id']}", use_container_width=True):
                         update_field(f['id'], name=new_name, keyword=new_keyword, keep=keep)
-                        st.toast("Đã cập nhật", icon="✅")
+                        st.success("Đã cập nhật")
                 with col5:
-                    if st.button("Xóa", key=f"del_{f['id']}", type="primary", use_container_width=True):
+                    if st.button("Xóa", key=f"del_{f['id']}", use_container_width=True):
                         remove_field(f['id'])
-                        st.rerun()
+                        st.experimental_rerun()
 
-        if st.button("🗑️ Xóa tất cả trường", type="primary", use_container_width=True):
+        if st.button("🗑️ Xóa tất cả trường", use_container_width=True):
             st.session_state.fields = []
             st.session_state.field_counter = 0
-            st.rerun()
+            st.experimental_rerun()
     
     st.markdown("---")
-    if st.button("🔄 Reset toàn bộ ứng dụng", type="secondary", use_container_width=True):
+    if st.button("🔄 Reset toàn bộ ứng dụng", use_container_width=True):
         st.session_state.clear()
-        st.rerun()
+        st.experimental_rerun()
 
 # --------------------- VÙNG LÀM VIỆC CHÍNH ---------------------
 tab1, tab2, tab3 = st.tabs(["📸 Chụp ảnh / Upload", "📊 Bảng dữ liệu", "📥 Xuất Excel"])
@@ -257,12 +263,12 @@ with tab1:
                     text = ocr_image(image)
                     st.session_state.last_text = text
                     
-                    # Tự động phát hiện trường nếu chưa cấu hình
                     if not st.session_state.fields and not st.session_state.detected_fields:
                         detected = auto_detect_fields(text)
                         if detected:
                             st.session_state.detected_fields = detected
-                            
+                    st.experimental_rerun()
+    
     with col_res:
         if st.session_state.last_text:
             text = st.session_state.last_text
@@ -277,7 +283,7 @@ with tab1:
                 st.subheader("🔎 Kết quả trích xuất")
                 row = extract_values(text, st.session_state.fields)
                 
-                if any(row.values()): # Nếu trích xuất được ít nhất 1 giá trị
+                if any(row.values()):
                     edited_row = {}
                     for key, val in row.items():
                         edited_row[key] = st.text_input(f"{key}", value=val)
@@ -299,7 +305,6 @@ with tab1:
 with tab2:
     st.subheader("📊 Bảng dữ liệu đã thu thập")
     if not st.session_state.data.empty:
-        # Cho phép chỉnh sửa trực tiếp trên bảng
         edited_df = st.data_editor(st.session_state.data, use_container_width=True, num_rows="dynamic")
         st.session_state.data = edited_df
         st.caption(f"Tổng số dòng: {len(st.session_state.data)}")
