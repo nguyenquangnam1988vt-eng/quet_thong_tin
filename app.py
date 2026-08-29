@@ -1,19 +1,18 @@
 import streamlit as st
 import pandas as pd
-import easyocr
 import re
 from io import BytesIO
-from PIL import Image, ImageEnhance, ImageFilter
+from PIL import Image, ImageEnhance
 import numpy as np
+from paddleocr import PaddleOCR
 
 # --------------------- CÀI ĐẶT BAN ĐẦU ---------------------
-st.set_page_config(page_title="OCR Info Extractor", layout="wide")
+st.set_page_config(page_title="OCR Info Extractor (PaddleOCR)", layout="wide")
 
 @st.cache_resource
-def load_ocr():
-    return easyocr.Reader(['vi', 'en'], gpu=False)
-
-reader = load_ocr()
+def load_paddle_ocr():
+    # Sử dụng tiếng Việt, không hiển thị log
+    return PaddleOCR(use_angle_cls=True, lang='vi', show_log=False)
 
 # --------------------- KHỞI TẠO SESSION STATE ---------------------
 if 'fields' not in st.session_state:
@@ -27,18 +26,11 @@ if 'detected_fields' not in st.session_state:
 
 # --------------------- HÀM TIỀN XỬ LÝ ẢNH ---------------------
 def preprocess_image(image_input):
-    """
-    Chuyển đổi đầu vào thành ảnh PIL, tiền xử lý: grayscale, tăng độ tương phản, resize.
-    """
-    if image_input is None:
-        return None
     try:
         if hasattr(image_input, 'getvalue'):
             img = Image.open(BytesIO(image_input.getvalue()))
         elif isinstance(image_input, Image.Image):
             img = image_input
-        elif isinstance(image_input, np.ndarray):
-            img = Image.fromarray(image_input)
         else:
             img = Image.open(BytesIO(image_input))
         # Chuyển sang grayscale
@@ -46,59 +38,58 @@ def preprocess_image(image_input):
             img = img.convert('L')
         # Tăng độ tương phản
         enhancer = ImageEnhance.Contrast(img)
-        img = enhancer.enhance(1.8)
-        # Resize để dễ OCR (giữ nguyên tỉ lệ, tối đa 1500px chiều dài)
+        img = enhancer.enhance(1.5)
+        # Resize nếu quá lớn
         max_size = 1500
         if max(img.size) > max_size:
             ratio = max_size / max(img.size)
             new_size = (int(img.size[0] * ratio), int(img.size[1] * ratio))
             img = img.resize(new_size, Image.Resampling.LANCZOS)
-        # Chuyển sang numpy
-        img_np = np.array(img)
-        return img_np
+        return np.array(img)
     except Exception as e:
         st.error(f"Lỗi tiền xử lý ảnh: {e}")
         return None
 
-# --------------------- HÀM OCR CẢI TIẾN ---------------------
+# --------------------- HÀM OCR VỚI PADDLEOCR ---------------------
 def ocr_image(image_input):
     img_np = preprocess_image(image_input)
     if img_np is None:
         return ""
     try:
-        # Thử với detail=0 để lấy văn bản
-        result = reader.readtext(img_np, detail=0, paragraph=False)
-        full_text = "\n".join(result)
-        return full_text
+        ocr = load_paddle_ocr()
+        result = ocr.ocr(img_np, cls=True)
+        if not result or not result[0]:
+            return ""
+        # Trích xuất văn bản từ kết quả
+        lines = []
+        for line in result:
+            for word_info in line:
+                # word_info: [bbox, (text, confidence)]
+                lines.append(word_info[1][0])
+        return "\n".join(lines)
     except Exception as e:
         st.error(f"Lỗi OCR: {e}")
         return ""
 
 # --------------------- PHÁT HIỆN TRƯỜNG CẢI TIẾN ---------------------
 def auto_detect_fields(text):
-    """
-    Tìm tất cả các cụm có dạng 'tên trường: giá trị' hoặc 'tên trường : giá trị'
-    Không yêu cầu ở đầu dòng.
-    """
     if not text.strip():
         return []
     detected = []
-    # Mẫu tìm kiếm: tên trường (không chứa dấu hai chấm) theo sau bởi dấu hai chấm và phần giá trị
-    # Cho phép khoảng trắng xung quanh dấu hai chấm
+    # Tìm các cụm 'tên trường: giá trị' hoặc 'tên trường : giá trị'
     pattern = re.compile(r'([^:：\n]+?)\s*[:：]\s*([^\n]+)', re.UNICODE)
     matches = pattern.findall(text)
     for field_name, value in matches:
         field_name = field_name.strip()
         value = value.strip()
         if len(field_name) < 50 and not re.search(r'[^\w\sÀ-ỹ]', field_name):
-            # Bỏ qua những dòng quá ngắn hoặc chỉ là số
             if len(value) > 0:
                 detected.append({
                     'name': field_name,
                     'keyword': field_name + ':',
                     'sample_value': value[:50]
                 })
-    # Loại bỏ trùng tên (giữ lần xuất hiện đầu tiên)
+    # Loại bỏ trùng
     seen = set()
     unique = []
     for d in detected:
@@ -107,7 +98,7 @@ def auto_detect_fields(text):
             unique.append(d)
     return unique
 
-# --------------------- CÁC HÀM QUẢN LÝ TRƯỜNG (KHÔNG ĐỔI) ---------------------
+# --------------------- CÁC HÀM QUẢN LÝ TRƯỜNG ---------------------
 def add_field(name, keyword, keep=True):
     st.session_state.field_counter += 1
     st.session_state.fields.append({
@@ -138,7 +129,6 @@ def extract_values(text, fields):
             pattern = re.compile(rf"{re.escape(f['keyword'])}\s*(.+)", re.IGNORECASE | re.UNICODE)
             match = pattern.search(text)
             if not match:
-                # Thử không dấu hai chấm nhưng có khoảng trắng
                 pattern2 = re.compile(rf"{re.escape(f['keyword'])}\s+(.+)", re.IGNORECASE | re.UNICODE)
                 match = pattern2.search(text)
             if match:
@@ -148,14 +138,14 @@ def extract_values(text, fields):
     return row
 
 # --------------------- GIAO DIỆN CHÍNH ---------------------
-st.title("📄 Trích xuất thông tin từ ảnh chụp (cải tiến OCR)")
+st.title("📄 Trích xuất thông tin với PaddleOCR")
 st.markdown("---")
 
 # Sidebar
 with st.sidebar:
     st.header("⚙️ Quản lý trường thông tin")
     if st.session_state.detected_fields:
-        st.subheader("🔍 Các trường vừa phát hiện từ ảnh")
+        st.subheader("🔍 Các trường vừa phát hiện")
         st.info("Chọn các trường muốn giữ, sửa tên nếu cần.")
         detected_choices = []
         for idx, d in enumerate(st.session_state.detected_fields):
@@ -249,24 +239,22 @@ with tab1:
             st.info("Chưa có ảnh")
 
     if image is not None:
-        # Nút OCR
         if st.button("🔍 Nhận diện chữ (OCR)"):
-            with st.spinner("Đang OCR..."):
+            with st.spinner("Đang OCR với PaddleOCR..."):
                 text = ocr_image(image)
-            st.session_state.last_text = text  # lưu để debug
+            st.session_state.last_text = text
             st.text_area("📝 Văn bản nhận diện", text, height=200)
 
-            # Debug: hiển thị số dòng
+            # Debug
             lines = text.split('\n')
             st.caption(f"Số dòng OCR: {len(lines)}")
-            # Hiển thị các dòng có dấu hai chấm để kiểm tra
             colon_lines = [l for l in lines if ':' in l or '：' in l]
             if colon_lines:
                 st.caption("Các dòng có dấu hai chấm:")
                 for l in colon_lines[:10]:
                     st.text(l)
             else:
-                st.warning("Không tìm thấy dòng nào có dấu hai chấm. Kiểm tra lại ảnh hoặc thêm trường thủ công.")
+                st.warning("Không tìm thấy dòng nào có dấu hai chấm.")
 
             # Phát hiện trường
             if not st.session_state.fields and not st.session_state.detected_fields:
@@ -294,7 +282,7 @@ with tab1:
                                 st.balloons()
                                 st.experimental_rerun()
                     else:
-                        st.info("Không trích xuất được giá trị nào. Kiểm tra từ khóa trường.")
+                        st.info("Không trích xuất được giá trị. Kiểm tra từ khóa.")
                 else:
                     st.info("Đã có trường phát hiện nhưng chưa lưu. Vào sidebar lưu lại.")
 
@@ -322,17 +310,11 @@ with tab3:
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
 
-# Hướng dẫn
 with st.expander("📖 Hướng dẫn sử dụng"):
     st.markdown("""
-    **Cải tiến OCR**:
-    - Ảnh được tự động tăng độ tương phản và chuyển sang grayscale để dễ nhận diện.
-    - Nếu OCR vẫn kém, hãy thử chụp ảnh rõ hơn, ánh sáng tốt, chữ to và thẳng hàng.
-    - Sử dụng nút "Nhận diện chữ" sau khi chọn ảnh.
+    **PaddleOCR** được sử dụng để nhận diện chữ, cho độ chính xác cao hơn EasyOCR, đặc biệt với tiếng Việt.
 
-    **Phát hiện trường**:
-    - Hệ thống tìm tất cả các dòng có dấu hai chấm (:) và hiển thị trong sidebar.
-    - Nếu không phát hiện, bạn có thể thêm trường thủ công trong sidebar.
-
-    **Các bước khác** như trước.
+    - Đảm bảo ảnh rõ ràng, ánh sáng tốt.
+    - Nhấn nút "Nhận diện chữ" sau khi có ảnh.
+    - Nếu không phát hiện trường, hãy thêm thủ công trong sidebar.
     """)
