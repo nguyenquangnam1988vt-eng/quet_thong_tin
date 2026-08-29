@@ -23,7 +23,7 @@ if 'data' not in st.session_state:
 if 'field_counter' not in st.session_state:
     st.session_state.field_counter = 0
 if 'detected_fields' not in st.session_state:
-    st.session_state.detected_fields = [] # lưu tạm các trường phát hiện từ ảnh
+    st.session_state.detected_fields = []
 
 # --------------------- HÀM TIỆN ÍCH ---------------------
 def add_field(name, keyword, keep=True):
@@ -49,20 +49,52 @@ def update_field(field_id, name=None, keyword=None, keep=None):
                 f['keep'] = keep
             break
 
-def ocr_image(image):
-    if isinstance(image, Image.Image):
-        image = np.array(image)
-    result = reader.readtext(image, detail=0)
-    return "\n".join(result)
+def ocr_image(image_input):
+    """
+    Nhận đầu vào có thể là:
+    - UploadedFile (từ st.camera_input hoặc st.file_uploader)
+    - PIL Image
+    - numpy array
+    - bytes
+    Trả về văn bản đã nhận diện.
+    """
+    if image_input is None:
+        return ""
+    try:
+        # Nếu là UploadedFile (có getvalue)
+        if hasattr(image_input, 'getvalue'):
+            bytes_data = image_input.getvalue()
+            img = Image.open(BytesIO(bytes_data))
+            img = np.array(img)
+        # Nếu là PIL Image
+        elif isinstance(image_input, Image.Image):
+            img = np.array(image_input)
+        # Nếu đã là numpy array
+        elif isinstance(image_input, np.ndarray):
+            img = image_input
+        # Nếu là bytes
+        elif isinstance(image_input, bytes):
+            img = np.array(Image.open(BytesIO(image_input)))
+        else:
+            # Thử ép thành bytes
+            img = np.array(Image.open(BytesIO(image_input)))
+        # EasyOCR yêu cầu ảnh dạng numpy (RGB)
+        if len(img.shape) == 3 and img.shape[2] == 4:
+            # Nếu có kênh alpha, chuyển sang RGB
+            img = img[:, :, :3]
+        result = reader.readtext(img, detail=0)
+        return "\n".join(result)
+    except Exception as e:
+        st.error(f"Lỗi khi nhận diện chữ: {str(e)}")
+        return ""
 
 def auto_detect_fields(text):
     """
     Tìm các dòng có dạng 'Tên trường: giá trị' hoặc 'Tên trường  giá trị'
-    Trả về list các dict {name, keyword}
+    Trả về list các dict {name, keyword, sample_value}
     """
     lines = text.split('\n')
     detected = []
-    # Mẫu: tìm dòng có dấu hai chấm hoặc khoảng trắng sau tên trường
     pattern = re.compile(r'^(.+?)\s*[:：]\s*(.+)$', re.UNICODE)
     for line in lines:
         line = line.strip()
@@ -72,14 +104,13 @@ def auto_detect_fields(text):
         if match:
             field_name = match.group(1).strip()
             value = match.group(2).strip()
-            # Chỉ lấy nếu field_name không quá dài và không chứa ký tự đặc biệt
             if len(field_name) < 50 and not re.search(r'[^\w\sÀ-ỹ]', field_name):
                 detected.append({
                     'name': field_name,
                     'keyword': field_name + ':',
-                    'sample_value': value[:50]  # để hiển thị mẫu
+                    'sample_value': value[:50]
                 })
-    # Loại bỏ trùng lặp theo tên
+    # Loại bỏ trùng lặp
     seen = set()
     unique = []
     for d in detected:
@@ -95,7 +126,6 @@ def extract_values(text, fields):
             pattern = re.compile(rf"{re.escape(f['keyword'])}\s*(.+)", re.IGNORECASE | re.UNICODE)
             match = pattern.search(text)
             if not match:
-                # thử không có dấu hai chấm
                 pattern2 = re.compile(rf"{re.escape(f['keyword'])}\s+(.+)", re.IGNORECASE | re.UNICODE)
                 match = pattern2.search(text)
             if match:
@@ -108,11 +138,11 @@ def extract_values(text, fields):
 st.title("📄 Trích xuất thông tin từ ảnh chụp")
 st.markdown("---")
 
-# Sidebar: Quản lý cấu hình trường (thủ công)
+# Sidebar: Quản lý cấu hình trường
 with st.sidebar:
     st.header("⚙️ Quản lý trường thông tin")
     
-    # Nếu có trường phát hiện tạm, hiển thị để chọn
+    # Hiển thị các trường vừa phát hiện (nếu có)
     if st.session_state.detected_fields:
         st.subheader("🔍 Các trường vừa phát hiện từ ảnh")
         st.info("Chọn các trường bạn muốn giữ lại, có thể sửa tên trường.")
@@ -123,18 +153,17 @@ with st.sidebar:
                 keep = st.checkbox("Giữ", value=True, key=f"detect_keep_{idx}")
             with col2:
                 new_name = st.text_input("Tên trường", value=d['name'], key=f"detect_name_{idx}")
-            # Lưu lựa chọn
             detected_choices.append({
                 'original': d,
                 'keep': keep,
                 'new_name': new_name,
-                'keyword': new_name + ':'   # tự động dùng tên mới làm keyword
+                'keyword': new_name + ':'
             })
         if st.button("💾 Lưu các trường đã chọn vào cấu hình"):
             for choice in detected_choices:
                 if choice['keep']:
                     add_field(choice['new_name'], choice['keyword'], keep=True)
-            st.session_state.detected_fields = []  # xóa tạm
+            st.session_state.detected_fields = []
             st.success(f"Đã thêm {len([c for c in detected_choices if c['keep']])} trường")
             st.experimental_rerun()
         if st.button("🗑️ Bỏ qua các trường phát hiện này"):
@@ -224,7 +253,6 @@ with tab1:
             else:
                 st.warning("Không phát hiện trường nào từ ảnh. Hãy thêm trường thủ công trong sidebar.")
         else:
-            # Nếu có trường (đã lưu hoặc đã phát hiện) thì trích xuất
             if st.session_state.fields:
                 row = extract_values(text, st.session_state.fields)
                 if row:
@@ -242,9 +270,8 @@ with tab1:
                             st.balloons()
                             st.experimental_rerun()
                 else:
-                    st.info("Không có trường nào để trích xuất (có thể các trường đều bị tắt 'Giữ').")
+                    st.info("Không có trường nào được kích hoạt để trích xuất (kiểm tra các trường có được 'Giữ' không).")
             else:
-                # Nếu chỉ có detected_fields nhưng chưa lưu, hướng dẫn qua sidebar
                 st.info("Đã phát hiện trường, hãy vào sidebar để chọn và lưu lại.")
 
 with tab2:
