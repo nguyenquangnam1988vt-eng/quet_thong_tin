@@ -1,7 +1,9 @@
-paddlepaddle
-paddleocr
-opencv-python
 streamlit
 pandas
-Pillow
+easyocr
 openpyxl
+Pillow
+numpy
+torch
+paddleocr
+opencv-python
