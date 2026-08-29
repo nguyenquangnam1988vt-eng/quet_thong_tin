@@ -1,6 +1,6 @@
 paddlepaddle
 paddleocr
-opencv-python-headless
+opencv-python
 streamlit
 pandas
 Pillow
