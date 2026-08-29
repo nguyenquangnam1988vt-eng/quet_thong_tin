@@ -9,7 +9,6 @@ import numpy as np
 # --------------------- CÀI ĐẶT BAN ĐẦU ---------------------
 st.set_page_config(page_title="OCR Info Extractor", layout="wide")
 
-# Khởi tạo EasyOCR (chạy trên CPU để tiết kiệm tài nguyên)
 @st.cache_resource
 def load_ocr():
     return easyocr.Reader(['vi', 'en'], gpu=False)
@@ -18,15 +17,16 @@ reader = load_ocr()
 
 # --------------------- KHỞI TẠO SESSION STATE ---------------------
 if 'fields' not in st.session_state:
-    st.session_state.fields = []      # danh sách các trường: [{'id': int, 'name': str, 'keyword': str, 'keep': bool}]
+    st.session_state.fields = []          # [{'id': int, 'name': str, 'keyword': str, 'keep': bool}]
 if 'data' not in st.session_state:
     st.session_state.data = pd.DataFrame()
 if 'field_counter' not in st.session_state:
     st.session_state.field_counter = 0
+if 'detected_fields' not in st.session_state:
+    st.session_state.detected_fields = [] # lưu tạm các trường phát hiện từ ảnh
 
 # --------------------- HÀM TIỆN ÍCH ---------------------
 def add_field(name, keyword, keep=True):
-    """Thêm một trường mới với id tự tăng"""
     st.session_state.field_counter += 1
     st.session_state.fields.append({
         'id': st.session_state.field_counter,
@@ -36,11 +36,9 @@ def add_field(name, keyword, keep=True):
     })
 
 def remove_field(field_id):
-    """Xóa trường theo id"""
     st.session_state.fields = [f for f in st.session_state.fields if f['id'] != field_id]
 
 def update_field(field_id, name=None, keyword=None, keep=None):
-    """Cập nhật thông tin của trường"""
     for f in st.session_state.fields:
         if f['id'] == field_id:
             if name is not None:
@@ -52,68 +50,124 @@ def update_field(field_id, name=None, keyword=None, keep=None):
             break
 
 def ocr_image(image):
-    """Nhận diện chữ từ ảnh (PIL Image hoặc numpy array)"""
     if isinstance(image, Image.Image):
         image = np.array(image)
     result = reader.readtext(image, detail=0)
     return "\n".join(result)
 
+def auto_detect_fields(text):
+    """
+    Tìm các dòng có dạng 'Tên trường: giá trị' hoặc 'Tên trường  giá trị'
+    Trả về list các dict {name, keyword}
+    """
+    lines = text.split('\n')
+    detected = []
+    # Mẫu: tìm dòng có dấu hai chấm hoặc khoảng trắng sau tên trường
+    pattern = re.compile(r'^(.+?)\s*[:：]\s*(.+)$', re.UNICODE)
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        match = pattern.match(line)
+        if match:
+            field_name = match.group(1).strip()
+            value = match.group(2).strip()
+            # Chỉ lấy nếu field_name không quá dài và không chứa ký tự đặc biệt
+            if len(field_name) < 50 and not re.search(r'[^\w\sÀ-ỹ]', field_name):
+                detected.append({
+                    'name': field_name,
+                    'keyword': field_name + ':',
+                    'sample_value': value[:50]  # để hiển thị mẫu
+                })
+    # Loại bỏ trùng lặp theo tên
+    seen = set()
+    unique = []
+    for d in detected:
+        if d['name'] not in seen:
+            seen.add(d['name'])
+            unique.append(d)
+    return unique
+
 def extract_values(text, fields):
-    """Trích xuất giá trị cho từng trường dựa trên từ khóa"""
     row = {}
     for f in fields:
         if f['keep']:
             pattern = re.compile(rf"{re.escape(f['keyword'])}\s*(.+)", re.IGNORECASE | re.UNICODE)
             match = pattern.search(text)
-            if match:
-                value = match.group(1).strip()
-            else:
-                # Thử tìm kiếm không có dấu hai chấm
+            if not match:
+                # thử không có dấu hai chấm
                 pattern2 = re.compile(rf"{re.escape(f['keyword'])}\s+(.+)", re.IGNORECASE | re.UNICODE)
-                match2 = pattern2.search(text)
-                if match2:
-                    value = match2.group(1).strip()
-                else:
-                    value = ""
-            row[f['name']] = value
+                match = pattern2.search(text)
+            if match:
+                row[f['name']] = match.group(1).strip()
+            else:
+                row[f['name']] = ""
     return row
 
 # --------------------- GIAO DIỆN CHÍNH ---------------------
 st.title("📄 Trích xuất thông tin từ ảnh chụp")
 st.markdown("---")
 
-# Sidebar: Quản lý cấu hình trường
+# Sidebar: Quản lý cấu hình trường (thủ công)
 with st.sidebar:
     st.header("⚙️ Quản lý trường thông tin")
     
-    # Thêm trường mới
-    with st.expander("➕ Thêm trường mới", expanded=False):
-        new_name = st.text_input("Tên trường (ví dụ: Họ và tên)")
-        new_keyword = st.text_input("Từ khóa tìm kiếm (ví dụ: 'Họ tên:' hoặc 'Họ và tên:')")
+    # Nếu có trường phát hiện tạm, hiển thị để chọn
+    if st.session_state.detected_fields:
+        st.subheader("🔍 Các trường vừa phát hiện từ ảnh")
+        st.info("Chọn các trường bạn muốn giữ lại, có thể sửa tên trường.")
+        detected_choices = []
+        for idx, d in enumerate(st.session_state.detected_fields):
+            col1, col2 = st.columns([1, 3])
+            with col1:
+                keep = st.checkbox("Giữ", value=True, key=f"detect_keep_{idx}")
+            with col2:
+                new_name = st.text_input("Tên trường", value=d['name'], key=f"detect_name_{idx}")
+            # Lưu lựa chọn
+            detected_choices.append({
+                'original': d,
+                'keep': keep,
+                'new_name': new_name,
+                'keyword': new_name + ':'   # tự động dùng tên mới làm keyword
+            })
+        if st.button("💾 Lưu các trường đã chọn vào cấu hình"):
+            for choice in detected_choices:
+                if choice['keep']:
+                    add_field(choice['new_name'], choice['keyword'], keep=True)
+            st.session_state.detected_fields = []  # xóa tạm
+            st.success(f"Đã thêm {len([c for c in detected_choices if c['keep']])} trường")
+            st.experimental_rerun()
+        if st.button("🗑️ Bỏ qua các trường phát hiện này"):
+            st.session_state.detected_fields = []
+            st.experimental_rerun()
+        st.markdown("---")
+    
+    # Thêm trường thủ công
+    with st.expander("➕ Thêm trường thủ công", expanded=False):
+        new_name = st.text_input("Tên trường")
+        new_keyword = st.text_input("Từ khóa tìm kiếm (ví dụ: 'Họ tên:')")
         if st.button("Thêm trường"):
             if new_name and new_keyword:
                 add_field(new_name, new_keyword)
                 st.success(f"Đã thêm trường '{new_name}'")
                 st.experimental_rerun()
             else:
-                st.error("Vui lòng nhập đầy đủ tên và từ khóa")
-    
-    # Hiển thị danh sách trường hiện tại
-    st.subheader("📋 Danh sách trường")
+                st.error("Vui lòng nhập đầy đủ")
+
+    # Danh sách trường hiện có
+    st.subheader("📋 Danh sách trường đã lưu")
     if not st.session_state.fields:
-        st.info("Chưa có trường nào. Hãy thêm trường ở trên.")
+        st.info("Chưa có trường nào. Hãy chụp ảnh để tự động phát hiện hoặc thêm thủ công.")
     else:
-        for idx, f in enumerate(st.session_state.fields):
+        for f in st.session_state.fields:
             with st.container():
                 col1, col2, col3 = st.columns([3, 3, 1])
                 with col1:
-                    # Cho phép sửa tên trường
                     new_name = st.text_input(f"Tên #{f['id']}", value=f['name'], key=f"name_{f['id']}")
                 with col2:
                     new_keyword = st.text_input(f"Từ khóa #{f['id']}", value=f['keyword'], key=f"kw_{f['id']}")
                 with col3:
                     keep = st.checkbox("Giữ", value=f['keep'], key=f"keep_{f['id']}")
-                # Nút cập nhật và xóa
                 col4, col5 = st.columns([1, 1])
                 with col4:
                     if st.button("Cập nhật", key=f"update_{f['id']}"):
@@ -123,18 +177,17 @@ with st.sidebar:
                 with col5:
                     if st.button("🗑️ Xóa", key=f"del_{f['id']}"):
                         remove_field(f['id'])
-                        st.warning("Đã xóa trường")
                         st.experimental_rerun()
                 st.markdown("---")
-    
-    # Nút xóa tất cả trường
-    if st.button("🗑️ Xóa tất cả trường"):
-        st.session_state.fields = []
-        st.session_state.field_counter = 0
-        st.experimental_rerun()
-    
+        if st.button("🗑️ Xóa tất cả trường"):
+            st.session_state.fields = []
+            st.session_state.field_counter = 0
+            st.experimental_rerun()
+
     st.markdown("---")
-    st.caption("Lưu ý: Các trường không được 'Giữ' sẽ bị bỏ qua khi trích xuất.")
+    if st.button("🔄 Reset toàn bộ dữ liệu"):
+        st.session_state.clear()
+        st.experimental_rerun()
 
 # Main area
 tab1, tab2, tab3 = st.tabs(["📸 Chụp ảnh / Upload", "📊 Bảng dữ liệu", "📥 Xuất Excel"])
@@ -142,7 +195,6 @@ tab1, tab2, tab3 = st.tabs(["📸 Chụp ảnh / Upload", "📊 Bảng dữ li�
 with tab1:
     col1, col2 = st.columns([1, 1])
     with col1:
-        # Cho phép chụp ảnh từ camera hoặc upload
         option = st.radio("Chọn nguồn ảnh:", ("📷 Chụp từ camera", "📁 Tải ảnh lên"))
         image = None
         if option == "📷 Chụp từ camera":
@@ -151,7 +203,6 @@ with tab1:
             uploaded = st.file_uploader("Chọn ảnh (JPG, PNG)", type=["jpg", "jpeg", "png"])
             if uploaded:
                 image = Image.open(uploaded)
-    
     with col2:
         if image is not None:
             st.image(image, caption="Ảnh đã chọn", use_container_width=True)
@@ -159,44 +210,50 @@ with tab1:
             st.info("Chưa có ảnh")
 
     if image is not None:
-        # OCR
         with st.spinner("Đang nhận diện chữ..."):
             text = ocr_image(image)
         st.text_area("📝 Văn bản nhận diện", text, height=150)
 
-        # Nếu có trường, tiến hành trích xuất
-        if st.session_state.fields:
-            # Trích xuất giá trị
-            row = extract_values(text, st.session_state.fields)
-            
-            # Hiển thị và cho phép chỉnh sửa
-            st.subheader("🔎 Thông tin trích xuất")
-            edited_row = {}
-            cols = st.columns(min(len(row), 4))
-            for i, (key, val) in enumerate(row.items()):
-                with cols[i % len(cols)]:
-                    edited_row[key] = st.text_input(f"{key}", value=val, key=f"edit_{key}_{i}")
-            
-            if st.button("➕ Thêm vào bảng", use_container_width=True):
-                if not edited_row:
-                    st.warning("Không có dữ liệu nào để thêm")
-                else:
-                    new_df = pd.DataFrame([edited_row])
-                    st.session_state.data = pd.concat([st.session_state.data, new_df], ignore_index=True)
-                    st.success("✅ Đã thêm dữ liệu vào bảng!")
-                    st.balloons()
-                    st.experimental_rerun()
+        # Nếu chưa có trường nào và chưa có detected_fields, tự động phát hiện
+        if not st.session_state.fields and not st.session_state.detected_fields:
+            detected = auto_detect_fields(text)
+            if detected:
+                st.session_state.detected_fields = detected
+                st.info(f"Đã phát hiện {len(detected)} trường. Vui lòng vào sidebar để chọn trường cần giữ.")
+                st.experimental_rerun()
+            else:
+                st.warning("Không phát hiện trường nào từ ảnh. Hãy thêm trường thủ công trong sidebar.")
         else:
-            st.warning("⚠️ Bạn chưa thiết lập trường thông tin. Vào sidebar để thêm trường.")
+            # Nếu có trường (đã lưu hoặc đã phát hiện) thì trích xuất
+            if st.session_state.fields:
+                row = extract_values(text, st.session_state.fields)
+                if row:
+                    st.subheader("🔎 Thông tin trích xuất")
+                    edited_row = {}
+                    cols = st.columns(min(len(row), 4))
+                    for i, (key, val) in enumerate(row.items()):
+                        with cols[i % len(cols)]:
+                            edited_row[key] = st.text_input(f"{key}", value=val, key=f"edit_{key}_{i}")
+                    if st.button("➕ Thêm vào bảng", use_container_width=True):
+                        if edited_row:
+                            new_df = pd.DataFrame([edited_row])
+                            st.session_state.data = pd.concat([st.session_state.data, new_df], ignore_index=True)
+                            st.success("✅ Đã thêm dữ liệu!")
+                            st.balloons()
+                            st.experimental_rerun()
+                else:
+                    st.info("Không có trường nào để trích xuất (có thể các trường đều bị tắt 'Giữ').")
+            else:
+                # Nếu chỉ có detected_fields nhưng chưa lưu, hướng dẫn qua sidebar
+                st.info("Đã phát hiện trường, hãy vào sidebar để chọn và lưu lại.")
 
 with tab2:
     st.subheader("📊 Bảng dữ liệu đã thu thập")
     if not st.session_state.data.empty:
         st.dataframe(st.session_state.data, use_container_width=True)
-        # Thống kê
         st.caption(f"Tổng số dòng: {len(st.session_state.data)}")
     else:
-        st.info("Chưa có dữ liệu. Hãy thêm ảnh và trích xuất thông tin.")
+        st.info("Chưa có dữ liệu.")
 
 with tab3:
     st.subheader("📥 Xuất dữ liệu ra Excel")
@@ -214,26 +271,22 @@ with tab3:
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
 
-# --------------------- RESET TOÀN BỘ ---------------------
-if st.sidebar.button("🔄 Reset toàn bộ dữ liệu"):
-    st.session_state.clear()
-    st.experimental_rerun()
-
-# --------------------- HƯỚNG DẪN SỬ DỤNG ---------------------
+# --------------------- HƯỚNG DẪN ---------------------
 with st.expander("📖 Hướng dẫn sử dụng"):
     st.markdown("""
-    **1. Thiết lập trường thông tin** (bên sidebar):
-    - Nhập tên trường (ví dụ: Họ và tên)
-    - Nhập từ khóa tìm kiếm (ví dụ: 'Họ tên:' hoặc 'Họ và tên:')
-    - Nhấn "Thêm trường"
-    - Có thể bật/tắt, sửa, xóa trường
+    **1. Tự động phát hiện trường (khi chưa có trường nào):**
+    - Chụp hoặc tải ảnh lên, hệ thống sẽ OCR và tìm các dòng có dấu hai chấm.
+    - Sau khi phát hiện, vào **sidebar** (bên trái), bạn sẽ thấy danh sách các trường vừa tìm thấy.
+    - Tick chọn những trường bạn muốn giữ, có thể sửa tên trường cho đúng.
+    - Nhấn **"Lưu các trường đã chọn"** để đưa vào cấu hình.
 
-    **2. Trích xuất dữ liệu**:
-    - Chụp ảnh hoặc tải ảnh lên
-    - Ứng dụng sẽ tự động nhận diện chữ và trích xuất thông tin theo các trường đã thiết lập
-    - Kiểm tra và sửa nếu cần, sau đó nhấn "Thêm vào bảng"
+    **2. Trích xuất thông tin:**
+    - Từ lần chụp thứ 2 trở đi, hệ thống sẽ tự động áp dụng các trường đã chọn để lấy giá trị.
+    - Bạn có thể chỉnh sửa giá trị trước khi thêm vào bảng.
 
-    **3. Xem bảng và xuất Excel**:
-    - Dữ liệu tích lũy sẽ hiển thị ở tab "Bảng dữ liệu"
-    - Ở tab "Xuất Excel", nhấn nút để tải file .xlsx về máy và chia sẻ qua Zalo
+    **3. Quản lý trường thủ công:**
+    - Bạn có thể thêm, sửa, xóa, bật/tắt trường bất cứ lúc nào trong sidebar.
+
+    **4. Xuất Excel và chia sẻ qua Zalo:**
+    - Vào tab "Xuất Excel", nhấn nút tạo file, tải về máy và gửi qua Zalo.
     """)
